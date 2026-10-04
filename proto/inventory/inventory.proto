@@ -1,0 +1,343 @@
+syntax = "proto3";
+
+option csharp_namespace = "GrpcInventoryService";
+option go_package = "github.com/ViUnrealProd/proto-contracts/gen/go/inventory";
+package inventory;
+
+// =====================================================================
+// InventoryService - Artifact item system
+//
+// Quy ước:
+// - Mọi message Request/Response đều kết thúc bằng "Request" / "Response".
+// - Request của người chơi mang jwt_token. Request do Dedicated Server gọi
+//   (Grant*) mang uid của người chơi (server token do gateway xử lý).
+// - Giá trị % được lưu dạng int32 basis point: 1% = 100, 12.5% = 1250.
+// - Giá trị flat là int32 thông thường.
+// - ArtiExp dùng int64.
+// - Toàn bộ giá trị chỉ số do server tính, client chỉ hiển thị.
+// - Base value, exp cần cho từng level, tỉ lệ hoàn exp... đều nằm ở datatable.
+// =====================================================================
+
+service InventoryService
+{
+  // Lấy toàn bộ kho artifact (không phân trang, client tự lọc/sắp xếp).
+  rpc GetArtifactInventory(GetArtifactInventoryRequest) returns (GetArtifactInventoryResponse);
+
+  // Lấy số dư ArtiExp.
+  rpc GetArtiExpBalance(GetArtiExpBalanceRequest) returns (GetArtiExpBalanceResponse);
+
+  // [Dedicated Server] Tạo mới 1 hoặc nhiều artifact cho người chơi.
+  rpc GrantArtifactItem(GrantArtifactItemRequest) returns (GrantArtifactItemResponse);
+
+  // [Dedicated Server] Cộng ArtiExp cho người chơi (thưởng nhiệm vụ...).
+  rpc GrantArtiExp(GrantArtiExpRequest) returns (GrantArtiExpResponse);
+
+  // Nâng cấp 1 artifact bằng ArtiExp dự trữ (+1 hoặc +5 level).
+  rpc UpgradeArtifactItem(UpgradeArtifactItemRequest) returns (UpgradeArtifactItemResponse);
+
+  // Nâng cấp 1 artifact bằng cách hiến tế các artifact khác làm nguyên liệu.
+  rpc UpgradeArtifactWithMaterials(UpgradeArtifactWithMaterialsRequest) returns (UpgradeArtifactWithMaterialsResponse);
+
+  // Phân rã 1 hoặc nhiều artifact thành ArtiExp.
+  rpc DismantleArtifactItems(DismantleArtifactItemsRequest) returns (DismantleArtifactItemsResponse);
+
+  // Trang bị artifact cho nhân vật (tự động tháo từ nhân vật cũ / món cũ cùng slot).
+  rpc EquipArtifactItem(EquipArtifactItemRequest) returns (EquipArtifactItemResponse);
+
+  // Tháo artifact khỏi nhân vật đang mang.
+  rpc UnequipArtifactItem(UnequipArtifactItemRequest) returns (UnequipArtifactItemResponse);
+}
+
+// =====================================================================
+// Enums
+// =====================================================================
+
+// Loại (slot) artifact. Mỗi nhân vật có 1 slot cho mỗi loại.
+enum ArtifactType
+{
+  ARTIFACT_TYPE_UNSPECIFIED = 0;
+  ARTIFACT_TYPE_SHIRT       = 1; // Áo
+  ARTIFACT_TYPE_PANTS       = 2; // Quần
+  ARTIFACT_TYPE_SHOES       = 3; // Giày
+  ARTIFACT_TYPE_GLOVES      = 4; // Găng tay
+  ARTIFACT_TYPE_HAT         = 5; // Mũ
+}
+
+// Loại chỉ số.
+enum StatType
+{
+  STAT_TYPE_UNSPECIFIED = 0;
+  STAT_TYPE_ARMOR       = 1; // flat hoặc %
+  STAT_TYPE_HEALTH      = 2; // flat hoặc %
+  STAT_TYPE_MIND        = 3; // flat hoặc %
+  STAT_TYPE_ATK         = 4; // flat hoặc %
+  STAT_TYPE_CRIT_DAMAGE = 5; // chỉ %
+  STAT_TYPE_CRIT_RATE   = 6; // chỉ %
+  STAT_TYPE_INTELLIGENT = 7; // chỉ flat
+}
+
+// Kiểu giá trị của 1 dòng chỉ số.
+enum StatValueType
+{
+  STAT_VALUE_TYPE_UNSPECIFIED = 0;
+  STAT_VALUE_TYPE_FLAT        = 1; // int32 thông thường
+  STAT_VALUE_TYPE_PERCENT     = 2; // int32 basis point (1% = 100)
+}
+
+// Loại thay đổi dòng phụ khi đạt mốc level (5, 10, ... 35).
+enum SubStatChangeType
+{
+  SUB_STAT_CHANGE_TYPE_NONE     = 0; // level này không phải mốc bội của 5
+  SUB_STAT_CHANGE_TYPE_ADDED    = 1; // thêm dòng phụ mới
+  SUB_STAT_CHANGE_TYPE_UPGRADED = 2; // nâng 1 dòng phụ có sẵn
+}
+
+// Mã kết quả dùng chung cho mọi response.
+enum ArtifactResultCode
+{
+  ARTIFACT_RESULT_CODE_UNSPECIFIED            = 0;
+  ARTIFACT_RESULT_CODE_OK                     = 1;
+  ARTIFACT_RESULT_CODE_INTERNAL_ERROR         = 2;
+  ARTIFACT_RESULT_CODE_INVALID_REQUEST        = 3;  // thiếu/sai tham số
+  ARTIFACT_RESULT_CODE_UNAUTHENTICATED        = 4;  // jwt không hợp lệ / hết hạn
+  ARTIFACT_RESULT_CODE_ITEM_NOT_FOUND         = 5;  // instant_id không tồn tại hoặc không thuộc user
+  ARTIFACT_RESULT_CODE_CLASS_NOT_FOUND        = 6;  // class_id không có trong datatable
+  ARTIFACT_RESULT_CODE_CHARACTER_NOT_OWNED    = 7;  // character_id không thuộc user
+  ARTIFACT_RESULT_CODE_NOT_ENOUGH_ARTIEXP     = 8;
+  ARTIFACT_RESULT_CODE_MAX_LEVEL_REACHED      = 9;  // item đã đạt level tối đa
+  ARTIFACT_RESULT_CODE_UPGRADE_EXCEEDS_MAX    = 10; // +N vượt quá level tối đa
+  ARTIFACT_RESULT_CODE_INVALID_UPGRADE_AMOUNT = 11; // levels không thuộc các mức cho phép (1 hoặc 5)
+  ARTIFACT_RESULT_CODE_TOO_MANY_ITEMS         = 12; // vượt giới hạn mảng (tối đa 20)
+  ARTIFACT_RESULT_CODE_DUPLICATE_ITEM         = 13; // instant_id bị lặp trong request
+  ARTIFACT_RESULT_CODE_MATERIAL_IS_TARGET     = 14; // nguyên liệu trùng với item đích
+  ARTIFACT_RESULT_CODE_INVALID_AMOUNT         = 15; // số lượng/ArtiExp <= 0
+}
+
+// =====================================================================
+// Shared data
+// =====================================================================
+
+// 1 dòng chỉ số (dòng chính hoặc dòng phụ).
+message ArtifactStat
+{
+  StatType      stat_type  = 1;
+  StatValueType value_type = 2;
+  int32         value      = 3; // flat: giá trị thật; percent: basis point
+}
+
+message ArtifactData
+{
+  // --- 4 trường bắt buộc ---
+  int32        class_id      = 1; // định danh artifact trong datatable (4xxx)
+  ArtifactType artifact_type = 2;
+  string       instant_id    = 3; // phân biệt các món cùng class_id
+  int32        category_id   = 4; // thuộc bộ nào (id trong datatable, không dùng enum)
+
+  // --- Phẩm chất & cấp độ ---
+  int32 star               = 5; // 1 đến 7, cố định theo class_id
+  int32 level              = 6; // level hiện tại
+  int32 max_level          = 7; // = star * 5
+
+  // --- Thanh tiến trình exp ---
+  int64 exp_progress       = 8;  // exp đã có trong level hiện tại
+  int64 exp_required_next  = 9;  // exp cần để lên level kế (0 nếu đã max level)
+  int64 total_exp_invested = 10; // tổng exp đã đầu tư (kèm exp_progress)
+  int64 dismantle_exp      = 11; // ArtiExp nhận được nếu phân rã / làm nguyên liệu (server tính sẵn)
+
+  // --- Chỉ số ---
+  ArtifactStat          main_stat = 12;
+  repeated ArtifactStat sub_stats = 13; // tối đa 4, thứ tự theo lúc được thêm vào
+
+  // --- Trang bị ---
+  int32 equipped_character_id = 14; // 0 = chưa trang bị
+
+  int64 created_at_unix = 15;
+}
+
+// 1 sự kiện lên level (dùng cho UI hiển thị từng bước khi nâng nhiều level).
+message ArtifactLevelUpEvent
+{
+  int32             new_level            = 1;
+  int32             main_stat_value      = 2; // giá trị dòng chính sau khi lên level này
+  SubStatChangeType sub_stat_change_type = 3;
+  ArtifactStat      sub_stat             = 4; // dòng phụ được thêm / nâng (giá trị sau khi đổi)
+  int32             sub_stat_index       = 5; // vị trí trong ArtifactData.sub_stats
+  int32             sub_stat_prev_value  = 6; // chỉ có nghĩa khi UPGRADED
+}
+
+// 1 mục grant.
+message GrantArtifactEntry
+{
+  int32 class_id = 1;
+  int32 quantity = 2; // > 0
+}
+
+// Thông tin 1 món đã bị phân rã.
+message DismantledArtifactInfo
+{
+  string instant_id = 1;
+  int32  class_id   = 2;
+  int64  exp_gained = 3;
+}
+
+// =====================================================================
+// GetArtifactInventory
+// =====================================================================
+
+message GetArtifactInventoryRequest
+{
+  string jwt_token = 1;
+}
+
+message GetArtifactInventoryResponse
+{
+  ArtifactResultCode    code             = 1;
+  repeated ArtifactData artifacts        = 2;
+  int64                 artiexp_balance  = 3;
+}
+
+// =====================================================================
+// GetArtiExpBalance
+// =====================================================================
+
+message GetArtiExpBalanceRequest
+{
+  string jwt_token = 1;
+}
+
+message GetArtiExpBalanceResponse
+{
+  ArtifactResultCode code            = 1;
+  int64              artiexp_balance = 2;
+}
+
+// =====================================================================
+// GrantArtifactItem  (Dedicated Server)
+// =====================================================================
+
+message GrantArtifactItemRequest
+{
+  int64                       uid        = 1;
+  string                      request_id = 2; // idempotency key, chống cộng trùng khi retry
+  string                      reason     = 3; // nguồn thưởng, dùng để log
+  repeated GrantArtifactEntry items      = 4; // tối đa 20 mục
+}
+
+message GrantArtifactItemResponse
+{
+  ArtifactResultCode    code                = 1;
+  repeated ArtifactData granted_artifacts   = 2; // các món vừa tạo (đã roll dòng chính/phụ)
+  bool                  is_duplicate_request = 3; // true nếu request_id đã xử lý, trả lại kết quả cũ
+}
+
+// =====================================================================
+// GrantArtiExp  (Dedicated Server)
+// =====================================================================
+
+message GrantArtiExpRequest
+{
+  int64  uid        = 1;
+  string request_id = 2;
+  string reason     = 3;
+  int64  amount     = 4; // > 0
+}
+
+message GrantArtiExpResponse
+{
+  ArtifactResultCode code                 = 1;
+  int64              granted_amount       = 2;
+  int64              artiexp_balance      = 3;
+  bool               is_duplicate_request = 4;
+}
+
+// =====================================================================
+// UpgradeArtifactItem  (dùng ArtiExp dự trữ)
+// =====================================================================
+
+message UpgradeArtifactItemRequest
+{
+  string jwt_token          = 1;
+  string instant_id         = 2;
+  int32  levels_to_upgrade  = 3; // 1 hoặc 5 (cho phép giá trị nào do backend cấu hình)
+}
+
+message UpgradeArtifactItemResponse
+{
+  ArtifactResultCode              code             = 1;
+  ArtifactData                    artifact         = 2; // trạng thái sau nâng cấp
+  int64                           artiexp_spent    = 3; // ArtiExp thực tế bị trừ (đã trừ phần thanh tiến trình)
+  int64                           artiexp_balance  = 4;
+  repeated ArtifactLevelUpEvent   level_ups        = 5; // mỗi level 1 phần tử
+}
+
+// =====================================================================
+// UpgradeArtifactWithMaterials  (hiến tế artifact làm nguyên liệu)
+// =====================================================================
+
+message UpgradeArtifactWithMaterialsRequest
+{
+  string          jwt_token            = 1;
+  string          target_instant_id    = 2;
+  repeated string material_instant_ids = 3; // tối đa 20
+}
+
+message UpgradeArtifactWithMaterialsResponse
+{
+  ArtifactResultCode            code                  = 1;
+  ArtifactData                  artifact              = 2; // item đích sau nâng cấp
+  int64                         exp_from_materials    = 3; // tổng exp quy đổi từ nguyên liệu
+  int64                         exp_applied           = 4; // exp thực sự dùng cho item đích
+  int64                         exp_refunded          = 5; // exp thừa hoàn vào ArtiExp (khi item đạt max level)
+  int64                         artiexp_balance       = 6;
+  repeated ArtifactLevelUpEvent level_ups             = 7;
+  repeated string               consumed_instant_ids  = 8; // các nguyên liệu đã bị xóa
+}
+
+// =====================================================================
+// DismantleArtifactItems  (phân rã -> ArtiExp)
+// =====================================================================
+
+message DismantleArtifactItemsRequest
+{
+  string          jwt_token   = 1;
+  repeated string instant_ids = 2; // tối đa 20
+}
+
+message DismantleArtifactItemsResponse
+{
+  ArtifactResultCode                code             = 1;
+  int64                             total_exp_gained = 2;
+  int64                             artiexp_balance  = 3;
+  repeated DismantledArtifactInfo   dismantled       = 4;
+}
+
+// =====================================================================
+// EquipArtifactItem / UnequipArtifactItem
+// =====================================================================
+
+message EquipArtifactItemRequest
+{
+  string jwt_token    = 1;
+  string instant_id   = 2;
+  int32  character_id = 3;
+}
+
+message EquipArtifactItemResponse
+{
+  ArtifactResultCode    code              = 1;
+  // Tất cả món có trạng thái trang bị thay đổi (món vừa trang bị,
+  // món bị đẩy ra khỏi slot của nhân vật đích, ...) để UI cập nhật.
+  repeated ArtifactData changed_artifacts = 2;
+}
+
+message UnequipArtifactItemRequest
+{
+  string jwt_token  = 1;
+  string instant_id = 2;
+}
+
+message UnequipArtifactItemResponse
+{
+  ArtifactResultCode code     = 1;
+  ArtifactData       artifact = 2; // trạng thái sau khi tháo (equipped_character_id = 0)
+}
